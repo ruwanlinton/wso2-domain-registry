@@ -1,10 +1,10 @@
-schemaVersion: 1.1
-
+schemaVersion: "1.2"
 endpoints:
-  - name: web
-    service:
-      port: 3000
-    type: REST
-    networkVisibilities:
-      - Public
-    context: /
+    - name: web
+      displayName: web
+      service:
+        basePath: /
+        port: 3000
+      type: REST
+      networkVisibilities:
+        - Public
