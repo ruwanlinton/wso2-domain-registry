@@ -2,7 +2,8 @@ schemaVersion: 1.1
 
 endpoints:
   - name: web
-    port: 3000
+    service:
+      port: 3000
     type: REST
     networkVisibilities:
       - Public
