@@ -1,7 +1,9 @@
-FROM node:20-alpine
+FROM node:20-slim
 WORKDIR /app
 
-RUN addgroup -S appgroup && adduser -S -u 10001 appuser -G appgroup
+RUN apt-get update && apt-get install -y openssl && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -g 10001 appgroup && useradd -u 10001 -g appgroup appuser
 
 COPY package*.json ./
 RUN npm ci --ignore-scripts
