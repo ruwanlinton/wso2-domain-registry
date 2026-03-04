@@ -4,49 +4,42 @@ import { Header } from "@/components/layout/Header";
 import { Card, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { statusVariant } from "@/lib/badge-variants";
-import { prisma } from "@/lib/db";
+import sql from "@/lib/db";
 import Link from "next/link";
 import { formatDistanceToNow } from "date-fns";
 
 async function getStats() {
-  const [domains, subdomains, requests, auditLogs] = await Promise.all([
-    prisma.domain.count(),
-    prisma.subdomain.count(),
-    prisma.domainRequest.groupBy({
-      by: ["status"],
-      _count: { status: true },
-    }),
-    prisma.auditLog.findMany({
-      orderBy: { createdAt: "desc" },
-      take: 8,
-    }),
-  ]);
-
-  const pendingCount =
-    requests.find((r) => r.status === "PENDING")?._count.status || 0;
-  const underReviewCount =
-    requests.find((r) => r.status === "UNDER_REVIEW")?._count.status || 0;
-
   const now = new Date();
   const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-  const approvedThisMonth = await prisma.domainRequest.count({
-    where: {
-      status: "APPROVED",
-      updatedAt: { gte: startOfMonth },
-    },
-  });
 
-  return { domains, subdomains, pendingCount, underReviewCount, approvedThisMonth, auditLogs };
+  const [domainsResult, subdomainsResult, requestsByStatus, auditLogs, approvedResult] =
+    await Promise.all([
+      sql`SELECT COUNT(*)::int AS count FROM "Domain"`,
+      sql`SELECT COUNT(*)::int AS count FROM "Subdomain"`,
+      sql`SELECT status, COUNT(*)::int AS count FROM "DomainRequest" GROUP BY status`,
+      sql`SELECT * FROM "AuditLog" ORDER BY "createdAt" DESC LIMIT 8`,
+      sql`SELECT COUNT(*)::int AS count FROM "DomainRequest" WHERE status = 'APPROVED' AND "updatedAt" >= ${startOfMonth}`,
+    ]);
+
+  const pendingCount = requestsByStatus.find((r) => r.status === "PENDING")?.count || 0;
+  const underReviewCount = requestsByStatus.find((r) => r.status === "UNDER_REVIEW")?.count || 0;
+
+  return {
+    domains: domainsResult[0].count,
+    subdomains: subdomainsResult[0].count,
+    pendingCount,
+    underReviewCount,
+    approvedThisMonth: approvedResult[0].count,
+    auditLogs,
+  };
 }
 
 async function getRecentRequests() {
-  return prisma.domainRequest.findMany({
-    orderBy: { requestedAt: "desc" },
-    take: 5,
-    include: {
-      domain: { select: { name: true } },
-    },
-  });
+  return sql`
+    SELECT * FROM "DomainRequest"
+    ORDER BY "requestedAt" DESC
+    LIMIT 5
+  `;
 }
 
 export default async function Dashboard() {

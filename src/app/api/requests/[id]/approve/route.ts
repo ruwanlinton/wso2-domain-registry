@@ -1,6 +1,6 @@
 export const dynamic = "force-dynamic";
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
+import sql from "@/lib/db";
 
 export async function POST(
   request: NextRequest,
@@ -10,9 +10,7 @@ export async function POST(
     const body = await request.json();
     const { approvedBy, comment } = body;
 
-    const domainRequest = await prisma.domainRequest.findUnique({
-      where: { id: params.id },
-    });
+    const [domainRequest] = await sql`SELECT * FROM "DomainRequest" WHERE id = ${params.id}`;
 
     if (!domainRequest) {
       return NextResponse.json({ error: "Request not found" }, { status: 404 });
@@ -25,30 +23,39 @@ export async function POST(
       );
     }
 
-    const [updated, approval] = await Promise.all([
-      prisma.domainRequest.update({
-        where: { id: params.id },
-        data: { status: "APPROVED" },
-      }),
-      prisma.approval.create({
-        data: {
-          requestId: params.id,
-          approvedBy: approvedBy || "system",
-          status: "APPROVED",
-          comment,
-        },
-      }),
-      prisma.auditLog.create({
-        data: {
-          action: "REQUEST_APPROVED",
-          entityType: "request",
-          entityId: params.id,
-          performedBy: approvedBy || "system",
-          details: comment || "Approved",
-          requestId: params.id,
-        },
-      }),
-    ]);
+    const approver = approvedBy || "system";
+    const now = new Date();
+
+    const [updated] = await sql`
+      UPDATE "DomainRequest" SET status = 'APPROVED', "updatedAt" = ${now} WHERE id = ${params.id} RETURNING *
+    `;
+
+    const approvalId = crypto.randomUUID();
+    const [approval] = await sql`
+      INSERT INTO "Approval" ${sql({
+        id: approvalId,
+        requestId: params.id,
+        approvedBy: approver,
+        status: "APPROVED",
+        comment: comment ?? null,
+        createdAt: now,
+        updatedAt: now,
+      })} RETURNING *
+    `;
+
+    await sql`
+      INSERT INTO "AuditLog" ${sql({
+        id: crypto.randomUUID(),
+        action: "REQUEST_APPROVED",
+        entityType: "request",
+        entityId: params.id,
+        performedBy: approver,
+        details: comment || "Approved",
+        requestId: params.id,
+        createdAt: now,
+        updatedAt: now,
+      })}
+    `;
 
     return NextResponse.json({ request: updated, approval });
   } catch (error) {

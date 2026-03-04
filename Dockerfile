@@ -1,8 +1,6 @@
 FROM node:20-slim
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y openssl && rm -rf /var/lib/apt/lists/*
-
 RUN groupadd -g 10001 appgroup && useradd -u 10001 -g appgroup appuser
 
 COPY package*.json ./
@@ -19,4 +17,4 @@ ENV PORT=3000
 USER 10001
 
 EXPOSE 3000
-CMD ["sh", "-c", "npx prisma migrate deploy && npm start"]
+CMD ["npm", "start"]

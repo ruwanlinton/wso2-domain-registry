@@ -1,6 +1,6 @@
 export const dynamic = "force-dynamic";
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
+import sql from "@/lib/db";
 
 export async function GET(request: NextRequest) {
   try {
@@ -10,19 +10,25 @@ export async function GET(request: NextRequest) {
     const status = searchParams.get("status");
     const purpose = searchParams.get("purpose");
 
-    const where: Record<string, unknown> = {};
-    if (domainId) where.domainId = domainId;
-    if (environment) where.environment = environment;
-    if (status) where.status = status;
-    if (purpose) where.purpose = purpose;
+    const subdomains = await sql`
+      SELECT s.*, d.name AS "domainName"
+      FROM "Subdomain" s
+      JOIN "Domain" d ON d.id = s."domainId"
+      WHERE TRUE
+        ${domainId ? sql`AND s."domainId" = ${domainId}` : sql``}
+        ${environment ? sql`AND s.environment = ${environment}` : sql``}
+        ${status ? sql`AND s.status = ${status}` : sql``}
+        ${purpose ? sql`AND s.purpose = ${purpose}` : sql``}
+      ORDER BY d.name ASC, s.name ASC
+    `;
 
-    const subdomains = await prisma.subdomain.findMany({
-      where,
-      include: { domain: { select: { name: true } } },
-      orderBy: [{ domain: { name: "asc" } }, { name: "asc" }],
-    });
+    const result = subdomains.map((s) => ({
+      ...s,
+      domain: { name: s.domainName },
+      domainName: undefined,
+    }));
 
-    return NextResponse.json(subdomains);
+    return NextResponse.json(result);
   } catch (error) {
     console.error("GET /api/subdomains error:", error);
     return NextResponse.json({ error: "Failed to fetch subdomains" }, { status: 500 });
@@ -32,11 +38,12 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const subdomain = await prisma.subdomain.create({
-      data: body,
-      include: { domain: { select: { name: true } } },
-    });
-    return NextResponse.json(subdomain, { status: 201 });
+    const id = crypto.randomUUID();
+    const now = new Date();
+    const data = { id, ...body, createdAt: now, updatedAt: now };
+    const [subdomain] = await sql`INSERT INTO "Subdomain" ${sql(data)} RETURNING *`;
+    const [domain] = await sql`SELECT name FROM "Domain" WHERE id = ${subdomain.domainId}`;
+    return NextResponse.json({ ...subdomain, domain: { name: domain?.name } }, { status: 201 });
   } catch (error) {
     console.error("POST /api/subdomains error:", error);
     return NextResponse.json({ error: "Failed to create subdomain" }, { status: 500 });

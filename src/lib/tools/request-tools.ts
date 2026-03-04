@@ -1,23 +1,38 @@
-import { prisma } from "@/lib/db";
+import sql from "@/lib/db";
 import { UserRole } from "@/lib/types";
 
 export async function getRequest(params: { requestId: string }) {
-  const request = await prisma.domainRequest.findUnique({
-    where: { id: params.requestId },
-    include: {
-      domain: true,
-      subdomain: true,
-      approvals: { orderBy: { createdAt: "asc" } },
-      comments: { orderBy: { createdAt: "asc" } },
-      auditLogs: { orderBy: { createdAt: "asc" } },
-    },
-  });
+  const [row] = await sql`
+    SELECT
+      dr.*,
+      d.name AS domain_name,
+      s."fullDomain" AS subdomain_full_domain
+    FROM "DomainRequest" dr
+    LEFT JOIN "Domain" d ON d.id = dr."domainId"
+    LEFT JOIN "Subdomain" s ON s.id = dr."subdomainId"
+    WHERE dr.id = ${params.requestId}
+  `;
 
-  if (!request) {
+  if (!row) {
     return { error: `Request ${params.requestId} not found` };
   }
 
-  return request;
+  const [approvals, comments, auditLogs] = await Promise.all([
+    sql`SELECT * FROM "Approval" WHERE "requestId" = ${params.requestId} ORDER BY "createdAt" ASC`,
+    sql`SELECT * FROM "Comment" WHERE "requestId" = ${params.requestId} ORDER BY "createdAt" ASC`,
+    sql`SELECT * FROM "AuditLog" WHERE "requestId" = ${params.requestId} ORDER BY "createdAt" ASC`,
+  ]);
+
+  return {
+    ...row,
+    domain: row.domain_name ? { name: row.domain_name } : null,
+    subdomain: row.subdomain_full_domain ? { fullDomain: row.subdomain_full_domain } : null,
+    approvals,
+    comments,
+    auditLogs,
+    domain_name: undefined,
+    subdomain_full_domain: undefined,
+  };
 }
 
 export async function listRequests(params: {
@@ -26,23 +41,25 @@ export async function listRequests(params: {
   requestedBy?: string;
   priority?: string;
 }) {
-  const where: Record<string, unknown> = {};
-  if (params.status) where.status = params.status;
-  if (params.type) where.type = params.type;
-  if (params.requestedBy) where.requestedBy = { contains: params.requestedBy };
-  if (params.priority) where.priority = params.priority;
+  const rows = await sql`
+    SELECT
+      dr.*,
+      d.name AS domain_name,
+      s."fullDomain" AS subdomain_full_domain,
+      (SELECT COUNT(*)::int FROM "Approval" a WHERE a."requestId" = dr.id) AS approval_count,
+      (SELECT COUNT(*)::int FROM "Comment" c WHERE c."requestId" = dr.id) AS comment_count
+    FROM "DomainRequest" dr
+    LEFT JOIN "Domain" d ON d.id = dr."domainId"
+    LEFT JOIN "Subdomain" s ON s.id = dr."subdomainId"
+    WHERE TRUE
+      ${params.status ? sql`AND dr.status = ${params.status}` : sql``}
+      ${params.type ? sql`AND dr.type = ${params.type}` : sql``}
+      ${params.requestedBy ? sql`AND dr."requestedBy" ILIKE ${"%" + params.requestedBy + "%"}` : sql``}
+      ${params.priority ? sql`AND dr.priority = ${params.priority}` : sql``}
+    ORDER BY dr."requestedAt" DESC
+  `;
 
-  const requests = await prisma.domainRequest.findMany({
-    where,
-    include: {
-      domain: { select: { name: true } },
-      subdomain: { select: { fullDomain: true } },
-      _count: { select: { approvals: true, comments: true } },
-    },
-    orderBy: { requestedAt: "desc" },
-  });
-
-  return requests.map((r) => ({
+  return rows.map((r) => ({
     id: r.id,
     type: r.type,
     status: r.status,
@@ -51,10 +68,10 @@ export async function listRequests(params: {
     description: r.description,
     requestedBy: r.requestedBy,
     requestedAt: r.requestedAt,
-    domainName: r.domain?.name,
-    subdomainFullDomain: r.subdomain?.fullDomain,
-    approvalCount: r._count.approvals,
-    commentCount: r._count.comments,
+    domainName: r.domain_name,
+    subdomainFullDomain: r.subdomain_full_domain,
+    approvalCount: r.approval_count,
+    commentCount: r.comment_count,
   }));
 }
 
@@ -70,40 +87,45 @@ export async function createDomainRequest(
   },
   requestedBy: string
 ) {
-  const request = await prisma.domainRequest.create({
-    data: {
+  const id = crypto.randomUUID();
+  const now = new Date();
+
+  const [request] = await sql`
+    INSERT INTO "DomainRequest" ${sql({
+      id,
       type: "CREATE_DOMAIN",
       status: "PENDING",
-      priority: (params.priority as "LOW" | "MEDIUM" | "HIGH" | "CRITICAL") || "MEDIUM",
+      priority: params.priority || "MEDIUM",
       title: params.title,
       description: params.description,
-      justification: params.justification,
+      justification: params.justification ?? null,
       requestedBy,
       proposedName: params.proposedName,
-      proposedEnvironment: params.proposedEnvironment as
-        | "PRODUCTION"
-        | "STAGING"
-        | "DEVELOPMENT"
-        | "ALL",
-      proposedDescription: params.proposedDescription,
-    },
-  });
+      proposedEnvironment: params.proposedEnvironment,
+      proposedDescription: params.proposedDescription ?? null,
+      requestedAt: now,
+      updatedAt: now,
+    })} RETURNING *
+  `;
 
-  await prisma.auditLog.create({
-    data: {
+  await sql`
+    INSERT INTO "AuditLog" ${sql({
+      id: crypto.randomUUID(),
       action: "REQUEST_CREATED",
       entityType: "request",
-      entityId: request.id,
+      entityId: id,
       performedBy: requestedBy,
       details: `Created domain request: ${params.title}`,
-      requestId: request.id,
-    },
-  });
+      requestId: id,
+      createdAt: now,
+      updatedAt: now,
+    })}
+  `;
 
   return {
     success: true,
-    requestId: request.id,
-    message: `Domain request "${params.title}" submitted successfully. Request ID: ${request.id}`,
+    requestId: id,
+    message: `Domain request "${params.title}" submitted successfully. Request ID: ${id}`,
     request,
   };
 }
@@ -122,9 +144,9 @@ export async function createSubdomainRequest(
   },
   requestedBy: string
 ) {
-  const domain = await prisma.domain.findFirst({
-    where: { name: { contains: params.domainName } },
-  });
+  const [domain] = await sql`
+    SELECT * FROM "Domain" WHERE name ILIKE ${"%" + params.domainName + "%"} LIMIT 1
+  `;
 
   if (!domain) {
     return {
@@ -132,52 +154,48 @@ export async function createSubdomainRequest(
     };
   }
 
-  const request = await prisma.domainRequest.create({
-    data: {
+  const id = crypto.randomUUID();
+  const now = new Date();
+
+  const [request] = await sql`
+    INSERT INTO "DomainRequest" ${sql({
+      id,
       type: "CREATE_SUBDOMAIN",
       status: "PENDING",
-      priority: (params.priority as "LOW" | "MEDIUM" | "HIGH" | "CRITICAL") || "MEDIUM",
+      priority: params.priority || "MEDIUM",
       title: params.title,
       description: params.description,
-      justification: params.justification,
+      justification: params.justification ?? null,
       requestedBy,
       proposedName: params.proposedName,
-      proposedEnvironment: (params.proposedEnvironment as
-        | "PRODUCTION"
-        | "STAGING"
-        | "DEVELOPMENT"
-        | "ALL") || domain.environment,
-      proposedPurpose: params.proposedPurpose as
-        | "API"
-        | "WEB_APP"
-        | "INTERNAL"
-        | "DOCS"
-        | "CDN"
-        | "MAIL"
-        | "MONITORING"
-        | "ANALYTICS"
-        | "OTHER",
-      proposedDescription: params.proposedDescription,
+      proposedEnvironment: params.proposedEnvironment || domain.environment,
+      proposedPurpose: params.proposedPurpose,
+      proposedDescription: params.proposedDescription ?? null,
       domainId: domain.id,
-    },
-  });
+      requestedAt: now,
+      updatedAt: now,
+    })} RETURNING *
+  `;
 
-  await prisma.auditLog.create({
-    data: {
+  await sql`
+    INSERT INTO "AuditLog" ${sql({
+      id: crypto.randomUUID(),
       action: "REQUEST_CREATED",
       entityType: "request",
-      entityId: request.id,
+      entityId: id,
       performedBy: requestedBy,
       details: `Created subdomain request: ${params.proposedName}.${domain.name}`,
-      requestId: request.id,
+      requestId: id,
       domainId: domain.id,
-    },
-  });
+      createdAt: now,
+      updatedAt: now,
+    })}
+  `;
 
   return {
     success: true,
-    requestId: request.id,
-    message: `Subdomain request for "${params.proposedName}.${domain.name}" submitted successfully. Request ID: ${request.id}`,
+    requestId: id,
+    message: `Subdomain request for "${params.proposedName}.${domain.name}" submitted successfully. Request ID: ${id}`,
     proposedFullDomain: `${params.proposedName}.${domain.name}`,
     request,
   };
@@ -200,54 +218,61 @@ export async function modifyEntryRequest(
   let subdomainId: string | undefined;
 
   if (params.entityType === "domain") {
-    const domain = await prisma.domain.findFirst({
-      where: { name: { contains: params.entityName } },
-    });
+    const [domain] = await sql`
+      SELECT id FROM "Domain" WHERE name ILIKE ${"%" + params.entityName + "%"} LIMIT 1
+    `;
     if (!domain) return { error: `Domain "${params.entityName}" not found` };
     domainId = domain.id;
   } else {
-    const subdomain = await prisma.subdomain.findFirst({
-      where: { fullDomain: { contains: params.entityName } },
-    });
+    const [subdomain] = await sql`
+      SELECT id, "domainId" FROM "Subdomain" WHERE "fullDomain" ILIKE ${"%" + params.entityName + "%"} LIMIT 1
+    `;
     if (!subdomain) return { error: `Subdomain "${params.entityName}" not found` };
     subdomainId = subdomain.id;
     domainId = subdomain.domainId;
   }
 
-  const type =
-    params.entityType === "domain" ? "MODIFY_DOMAIN" : "MODIFY_SUBDOMAIN";
+  const type = params.entityType === "domain" ? "MODIFY_DOMAIN" : "MODIFY_SUBDOMAIN";
+  const id = crypto.randomUUID();
+  const now = new Date();
 
-  const request = await prisma.domainRequest.create({
-    data: {
-      type: type as "MODIFY_DOMAIN" | "MODIFY_SUBDOMAIN",
+  const [request] = await sql`
+    INSERT INTO "DomainRequest" ${sql({
+      id,
+      type,
       status: "PENDING",
-      priority: (params.priority as "LOW" | "MEDIUM" | "HIGH" | "CRITICAL") || "MEDIUM",
+      priority: params.priority || "MEDIUM",
       title: params.title,
       description: params.description,
-      justification: params.justification,
+      justification: params.justification ?? null,
       requestedBy,
       currentValue: params.currentValue,
       proposedValue: params.proposedValue,
-      domainId,
-      subdomainId,
-    },
-  });
+      domainId: domainId ?? null,
+      subdomainId: subdomainId ?? null,
+      requestedAt: now,
+      updatedAt: now,
+    })} RETURNING *
+  `;
 
-  await prisma.auditLog.create({
-    data: {
+  await sql`
+    INSERT INTO "AuditLog" ${sql({
+      id: crypto.randomUUID(),
       action: "REQUEST_CREATED",
       entityType: "request",
-      entityId: request.id,
+      entityId: id,
       performedBy: requestedBy,
       details: `Created modification request for ${params.entityType}: ${params.entityName}`,
-      requestId: request.id,
-    },
-  });
+      requestId: id,
+      createdAt: now,
+      updatedAt: now,
+    })}
+  `;
 
   return {
     success: true,
-    requestId: request.id,
-    message: `Modification request submitted. Request ID: ${request.id}`,
+    requestId: id,
+    message: `Modification request submitted. Request ID: ${id}`,
     request,
   };
 }
@@ -267,52 +292,59 @@ export async function deleteEntryRequest(
   let subdomainId: string | undefined;
 
   if (params.entityType === "domain") {
-    const domain = await prisma.domain.findFirst({
-      where: { name: { contains: params.entityName } },
-    });
+    const [domain] = await sql`
+      SELECT id FROM "Domain" WHERE name ILIKE ${"%" + params.entityName + "%"} LIMIT 1
+    `;
     if (!domain) return { error: `Domain "${params.entityName}" not found` };
     domainId = domain.id;
   } else {
-    const subdomain = await prisma.subdomain.findFirst({
-      where: { fullDomain: { contains: params.entityName } },
-    });
+    const [subdomain] = await sql`
+      SELECT id, "domainId" FROM "Subdomain" WHERE "fullDomain" ILIKE ${"%" + params.entityName + "%"} LIMIT 1
+    `;
     if (!subdomain) return { error: `Subdomain "${params.entityName}" not found` };
     subdomainId = subdomain.id;
     domainId = subdomain.domainId;
   }
 
-  const type =
-    params.entityType === "domain" ? "DELETE_DOMAIN" : "DELETE_SUBDOMAIN";
+  const type = params.entityType === "domain" ? "DELETE_DOMAIN" : "DELETE_SUBDOMAIN";
+  const id = crypto.randomUUID();
+  const now = new Date();
 
-  const request = await prisma.domainRequest.create({
-    data: {
-      type: type as "DELETE_DOMAIN" | "DELETE_SUBDOMAIN",
+  const [request] = await sql`
+    INSERT INTO "DomainRequest" ${sql({
+      id,
+      type,
       status: "PENDING",
-      priority: (params.priority as "LOW" | "MEDIUM" | "HIGH" | "CRITICAL") || "MEDIUM",
+      priority: params.priority || "MEDIUM",
       title: params.title,
       description: params.description,
-      justification: params.justification,
+      justification: params.justification ?? null,
       requestedBy,
-      domainId,
-      subdomainId,
-    },
-  });
+      domainId: domainId ?? null,
+      subdomainId: subdomainId ?? null,
+      requestedAt: now,
+      updatedAt: now,
+    })} RETURNING *
+  `;
 
-  await prisma.auditLog.create({
-    data: {
+  await sql`
+    INSERT INTO "AuditLog" ${sql({
+      id: crypto.randomUUID(),
       action: "REQUEST_CREATED",
       entityType: "request",
-      entityId: request.id,
+      entityId: id,
       performedBy: requestedBy,
       details: `Created deletion request for ${params.entityType}: ${params.entityName}`,
-      requestId: request.id,
-    },
-  });
+      requestId: id,
+      createdAt: now,
+      updatedAt: now,
+    })}
+  `;
 
   return {
     success: true,
-    requestId: request.id,
-    message: `Deletion request submitted. Request ID: ${request.id}`,
+    requestId: id,
+    message: `Deletion request submitted. Request ID: ${id}`,
     request,
   };
 }
@@ -328,9 +360,7 @@ export async function approveRequest(
     };
   }
 
-  const request = await prisma.domainRequest.findUnique({
-    where: { id: params.requestId },
-  });
+  const [request] = await sql`SELECT * FROM "DomainRequest" WHERE id = ${params.requestId}`;
 
   if (!request) {
     return { error: `Request ${params.requestId} not found` };
@@ -342,30 +372,38 @@ export async function approveRequest(
     };
   }
 
-  const [updatedRequest, approval] = await Promise.all([
-    prisma.domainRequest.update({
-      where: { id: params.requestId },
-      data: { status: "APPROVED" },
-    }),
-    prisma.approval.create({
-      data: {
-        requestId: params.requestId,
-        approvedBy,
-        status: "APPROVED",
-        comment: params.comment,
-      },
-    }),
-    prisma.auditLog.create({
-      data: {
-        action: "REQUEST_APPROVED",
-        entityType: "request",
-        entityId: params.requestId,
-        performedBy: approvedBy,
-        details: params.comment || "Approved",
-        requestId: params.requestId,
-      },
-    }),
-  ]);
+  const now = new Date();
+  const approvalId = crypto.randomUUID();
+
+  const [updatedRequest] = await sql`
+    UPDATE "DomainRequest" SET status = 'APPROVED', "updatedAt" = ${now} WHERE id = ${params.requestId} RETURNING *
+  `;
+
+  const [approval] = await sql`
+    INSERT INTO "Approval" ${sql({
+      id: approvalId,
+      requestId: params.requestId,
+      approvedBy,
+      status: "APPROVED",
+      comment: params.comment ?? null,
+      createdAt: now,
+      updatedAt: now,
+    })} RETURNING *
+  `;
+
+  await sql`
+    INSERT INTO "AuditLog" ${sql({
+      id: crypto.randomUUID(),
+      action: "REQUEST_APPROVED",
+      entityType: "request",
+      entityId: params.requestId,
+      performedBy: approvedBy,
+      details: params.comment || "Approved",
+      requestId: params.requestId,
+      createdAt: now,
+      updatedAt: now,
+    })}
+  `;
 
   return {
     success: true,
@@ -387,9 +425,7 @@ export async function rejectRequest(
     };
   }
 
-  const request = await prisma.domainRequest.findUnique({
-    where: { id: params.requestId },
-  });
+  const [request] = await sql`SELECT * FROM "DomainRequest" WHERE id = ${params.requestId}`;
 
   if (!request) {
     return { error: `Request ${params.requestId} not found` };
@@ -401,30 +437,38 @@ export async function rejectRequest(
     };
   }
 
-  const [updatedRequest, approval] = await Promise.all([
-    prisma.domainRequest.update({
-      where: { id: params.requestId },
-      data: { status: "REJECTED" },
-    }),
-    prisma.approval.create({
-      data: {
-        requestId: params.requestId,
-        approvedBy: rejectedBy,
-        status: "REJECTED",
-        comment: params.reason,
-      },
-    }),
-    prisma.auditLog.create({
-      data: {
-        action: "REQUEST_REJECTED",
-        entityType: "request",
-        entityId: params.requestId,
-        performedBy: rejectedBy,
-        details: params.reason,
-        requestId: params.requestId,
-      },
-    }),
-  ]);
+  const now = new Date();
+  const approvalId = crypto.randomUUID();
+
+  const [updatedRequest] = await sql`
+    UPDATE "DomainRequest" SET status = 'REJECTED', "updatedAt" = ${now} WHERE id = ${params.requestId} RETURNING *
+  `;
+
+  const [approval] = await sql`
+    INSERT INTO "Approval" ${sql({
+      id: approvalId,
+      requestId: params.requestId,
+      approvedBy: rejectedBy,
+      status: "REJECTED",
+      comment: params.reason,
+      createdAt: now,
+      updatedAt: now,
+    })} RETURNING *
+  `;
+
+  await sql`
+    INSERT INTO "AuditLog" ${sql({
+      id: crypto.randomUUID(),
+      action: "REQUEST_REJECTED",
+      entityType: "request",
+      entityId: params.requestId,
+      performedBy: rejectedBy,
+      details: params.reason,
+      requestId: params.requestId,
+      createdAt: now,
+      updatedAt: now,
+    })}
+  `;
 
   return {
     success: true,

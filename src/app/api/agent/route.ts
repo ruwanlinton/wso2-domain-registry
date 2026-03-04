@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 import { NextRequest } from "next/server";
 import { anthropic, AGENT_TOOLS, buildSystemPrompt } from "@/lib/claude";
-import { prisma } from "@/lib/db";
+import sql from "@/lib/db";
 import { MOCK_USERS, UserRole } from "@/lib/types";
 import {
   listDomains,
@@ -137,10 +137,9 @@ export async function POST(request: NextRequest) {
     const userRole = user.role as UserRole;
 
     // Fetch domain list for system prompt
-    const domains = await prisma.domain.findMany({
-      select: { name: true, environment: true, status: true },
-      orderBy: { name: "asc" },
-    });
+    const domains = await sql`
+      SELECT name, environment, status FROM "Domain" ORDER BY name ASC
+    `;
 
     const systemPrompt = buildSystemPrompt(user.name, userRole, domains);
 

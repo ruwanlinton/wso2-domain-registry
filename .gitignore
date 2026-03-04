@@ -12,12 +12,6 @@ build/
 .env.local
 .env
 
-# Database
-prisma/dev.db
-prisma/dev.db-journal
-prisma/**/*.db
-prisma/**/*.db-journal
-
 # Misc
 .DS_Store
 *.pem
